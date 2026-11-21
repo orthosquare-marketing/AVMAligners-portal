@@ -1,0 +1,17 @@
+{
+  "name": "avmaligners-portal",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AVM Aligners Portal - modular, API-based aligner case, production and dispatch system",
+  "workspaces": ["packages/*", "services/*", "gateway", "apps/*"],
+  "scripts": {
+    "dev:identity": "npm run dev -w @avm/identity",
+    "dev:masters": "npm run dev -w @avm/masters",
+    "dev:onboarding": "npm run dev -w @avm/onboarding",
+    "dev:gateway": "npm run dev -w @avm/gateway",
+    "dev:web": "npm run dev -w @avm/web",
+    "test": "node scripts/e2e.mjs",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
