@@ -1,0 +1,34 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+    env:
+      JWT_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
+      INTERNAL_API_KEY: ci-internal-key-ci-internal-key
+      IDENTITY_URL: http://localhost:4001
+      MASTERS_URL: http://localhost:4002
+      ONBOARDING_URL: http://localhost:4003
+      SUPER_ADMIN_EMAIL: super@example.test
+      SUPER_ADMIN_PASSWORD: CiSuperAdmin12345
+      LOGIN_RATE_LIMIT: 1000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build -w @avm/web
+      - name: Start services
+        run: |
+          MONGO_URL=mongodb://localhost:27017/avm_identity PORT=4001 node services/identity/src/server.js &
+          MONGO_URL=mongodb://localhost:27017/avm_masters PORT=4002 node services/masters/src/server.js &
+          MONGO_URL=mongodb://localhost:27017/avm_onboarding PORT=4003 node services/onboarding/src/server.js &
+          PORT=4000 node gateway/src/server.js &
+          for i in $(seq 1 30); do curl -sf localhost:4000/health | grep -q '"identity":"ok"' && break; sleep 1; done
+      - run: npm test

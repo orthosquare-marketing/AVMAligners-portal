@@ -1,0 +1,56 @@
+# Runs the whole portal on one machine: database, three API services, gateway and web app.
+# Start with start.bat (Windows) or: docker compose up -d --build
+x-service: &service
+  build: { context: ., dockerfile: Dockerfile.service }
+  restart: unless-stopped
+  depends_on: { mongo: { condition: service_healthy } }
+x-env: &env
+  JWT_SECRET: ${JWT_SECRET:?run start.bat or copy .env.example to .env first}
+  INTERNAL_API_KEY: ${INTERNAL_API_KEY:?missing in .env}
+  IDENTITY_URL: http://identity:4001
+  MASTERS_URL: http://masters:4002
+  ONBOARDING_URL: http://onboarding:4003
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes: [mongo-data:/data/db]
+    healthcheck: { test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"], interval: 5s, timeout: 5s, retries: 20 }
+    # Not published to the network. Only the services inside this stack can reach the database.
+
+  identity:
+    <<: *service
+    build: { context: ., dockerfile: Dockerfile.service, args: { SERVICE_PATH: services/identity } }
+    environment:
+      <<: *env
+      PORT: 4001
+      MONGO_URL: mongodb://mongo:27017/avm_identity
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD}
+
+  masters:
+    <<: *service
+    build: { context: ., dockerfile: Dockerfile.service, args: { SERVICE_PATH: services/masters } }
+    environment: { <<: *env, PORT: 4002, MONGO_URL: mongodb://mongo:27017/avm_masters }
+
+  onboarding:
+    <<: *service
+    build: { context: ., dockerfile: Dockerfile.service, args: { SERVICE_PATH: services/onboarding } }
+    environment: { <<: *env, PORT: 4003, MONGO_URL: mongodb://mongo:27017/avm_onboarding }
+
+  gateway:
+    build: { context: ., dockerfile: Dockerfile.service, args: { SERVICE_PATH: gateway } }
+    restart: unless-stopped
+    depends_on: [identity, masters, onboarding]
+    environment: { PORT: 4000, IDENTITY_URL: http://identity:4001, MASTERS_URL: http://masters:4002, ONBOARDING_URL: http://onboarding:4003, CORS_ORIGIN: http://localhost:8080 }
+    ports: ["127.0.0.1:4000:4000"]
+
+  web:
+    build: { context: ., dockerfile: apps/web/Dockerfile }
+    restart: unless-stopped
+    depends_on: [gateway]
+    ports: ["127.0.0.1:8080:80"]
+
+volumes:
+  mongo-data:
