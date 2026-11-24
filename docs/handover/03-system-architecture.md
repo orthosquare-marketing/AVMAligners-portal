@@ -1,260 +1,122 @@
 # 03 — System architecture
 
-## 1. Principles
+_AVMAligners Portal · handover pack v2.0 · 24-11-2026. Replaces v1 of 22-11-2026._
 
-1. **Modular, not monolithic.** Each module is a service with its own API and its own database. No service reads another service's database. **Settled.**
-2. **API first.** The web app, the patient app and other services all use the same documented HTTP APIs.
-3. **Access is enforced in every service.** Each service checks the token, the permission and the scope itself. It does not trust the gateway or the client.
-4. **Pick, never type.** Clinic, doctor, patient, product and machine are always chosen from records. Free text is never used as an identifier.
-5. **Nothing is lost silently.** Status changes, approvals and deletions leave a record.
+Two rules govern every choice here: **pay for one of everything**, and **write down who, when and
+which version, and never delete**. The first keeps the bill near ₹10,000 a month. The second is what
+makes ISO 13485 straightforward instead of painful.
 
-## 2. Stack
+## 1. The fourteen design rules
 
-| Layer | Choice | Status |
+| Rule | What it means | Serves |
 |---|---|---|
-| Database | MongoDB (Mongoose) | **Settled** (MERN) |
-| API services | Node.js 20+, Express, plain JavaScript, ES modules | **Settled** |
-| Web app | React with Vite | **Settled** |
-| Patient app | React Native, one codebase for Android and iPhone | **Assumed** |
-| File storage | S3-compatible object storage | **Assumed** |
-| Packaging | Docker; npm workspaces in one repository | Built |
+| **A01 One app, many modules** | Every module keeps its own database and its own API, but they all run inside one Node process on one Azure plan. The boundaries stay; the server bill does not multiply. | Saves money |
+| **A02 The front end rides along** | The built React app is served as static files by the same Express app. No second host, no CORS, one deployment, one domain. | Saves money |
+| **A03 One database cluster** | All databases sit on one MongoDB Atlas cluster in Mumbai. Separate databases cost nothing extra on the same cluster. | Saves money |
+| **A04 The worker lives in the app** | Timed jobs run inside the same app with Always On, and take their work from a queue. No separate function app to keep warm. | Saves money |
+| **A05 Nothing is ever deleted** | Records change state. Delete is a state, not an operation. No record leaves the database except by the retention job, which writes down what it removed. | Helps certification |
+| **A06 Every record says who and when** | Created by, created at, changed by, changed at, a version number, and the software release that wrote it. On every document, in every database, from the first line of code. | Helps certification |
+| **A07 The audit log can only be added to** | A separate database user with insert-only rights writes the audit log. The application cannot change or remove an audit event even if someone wants it to. | Helps certification |
+| **A08 An approval is a sealed record** | The orthodontist re-enters the password at the moment of approval. The record holds the name, registration number, plan version, scan reference, a fingerprint of exactly what was approved, the time and the address it came from. It is never edited. | Helps certification |
+| **A09 Every case carries its software version** | The release of the portal, the version of the planning software and the scanner model are stamped on the case. An auditor asking "what made this tray" gets an answer. | Helps certification |
+| **A10 One query walks the whole chain** | Material lot to set to box to consignment to partner, forwards and backwards. Built as a single query, not a report somebody assembles by hand. | Helps certification |
+| **A11 Every release is a record in the database** | Version, date, what changed, who approved it, and a link to the test report. Written automatically when the release is deployed. | Helps certification |
+| **A12 Access is checked in the API, not the menu** | The login token, the permission and the ownership of the record are checked on every request. A record outside a user’s scope returns "not found", so its existence is not revealed. | Both |
+| **A13 No transactions across databases** | A step that fails undoes the steps before it, in code, and writes an audit event for the undo. This is already the rule in the codebase. | Both |
+| **A14 Everything stays in India** | Azure Central India, Atlas Mumbai. Patient data does not leave the country. | Helps certification |
 
-## 3. Services
 
-In the core design, fifteen modules run as eleven services. Version 2.0 adds fifteen modules and twelve services; they are listed in section 13. Modules that always change together share a service.
+## 2. What runs where
 
-| Service | Modules | Database | Status |
+| Resource | What runs on it | Why this and not something larger |
+|---|---|---|
+| App Service plan, Linux, Central India | The gateway, every service as a module in one Node process, the worker, and the built React app as static files. | One machine. Always On keeps the worker alive. A deployment slot gives staging at no extra cost. |
+| MongoDB Atlas, Mumbai, M10 | All eleven databases. | A replica set, so transactions work inside a database. Backups and point-in-time restore included. Separate databases cost nothing extra on one cluster. |
+| Blob Storage | Three containers: media, docs, exports. Lifecycle rules per container. | Retention becomes a storage rule instead of a job somebody has to remember. |
+| Storage Queues | Five queues, one per job type. | A stuck courier API must not delay a payment reminder. |
+| Key Vault | Connection strings, WATI, Razorpay, IRP credentials. | No secret in the repository, and every access logged. |
+| Application Insights | Errors and slow requests, sampled, thirty days. | Enough to find a fault, not enough to become a line item. |
+| GitHub Actions | Build, test, deploy to the slot, swap. | The test run is the evidence that a release was tested. |
+
+
+## 3. How a request travels
+
+1. The browser loads the React app from the App Service.
+2. It calls `/api/<service>/...` on the same domain. No CORS, no second host.
+3. The gateway checks the token, the permission and the rate limit, and refuses anything addressed to an internal route.
+4. The service reads and writes **only its own database**, and calls another service through its API when it needs to.
+5. Anything slow, external or scheduled goes on a queue for the worker.
+6. Every create, update, approval and access change writes an audit event on the way out.
+
+## 4. One process, many services
+
+Each service keeps its own database, its own API and its own router. They run **inside one Node
+process** on one Azure plan. `internalCall` becomes a direct call instead of a network hop: faster,
+and one bill instead of five. If a service ever needs to scale alone it moves out to its own plan
+with its routes and database unchanged — but not before then.
+
+**There are still no transactions across services.** A step that fails undoes the steps before it,
+in code, and writes an audit event for the undo.
+
+## 5. The worker
+
+| Queue | Work on it | Runs | Why it is separate |
 |---|---|---|---|
-| `gateway` | Routing, rate limit | none | Built |
-| `identity` | Identity and access, audit log | `avm_identity` | Built |
-| `masters` | Clinics, doctors, products, price lists | `avm_masters` | Built; price lists to add |
-| `onboarding` | Lead management, distributors, onboarding approval | `avm_onboarding` | Built in part; lead pipeline and two-step approval to add (sales track) |
-| `integrations` | Adapters for ad platforms, LumenAI, MCube, Exotel, WhatsApp Business | `avm_integrations` | Sales track |
-| `cases` | Patients, prescriptions, plans, treatment planning | `avm_cases` | Phase 2 |
-| `files` | Photos, x-rays, videos, IPR, STL scans | `avm_files` | Phase 2 |
-| `production` | Aligner sets, print orders, batches, QC, inventory, machines, dispatch, schedule | `avm_production` | Phase 3 |
-| `tracker` | Patient check-ins, wear time, doctor decisions | `avm_tracker` | Phase 4 |
-| `notifications` | Templates, sending, message log | `avm_notifications` | Phase 4 |
-| `billing` | Invoices, payments | `avm_billing` | Phase 5 |
-| `reports` | Read-only summaries built from the other services' APIs | `avm_reports` (cache only) | Phase 5 |
+| q-notify | Reminders to partners, case state changes, invoice due reminders, statement mails. | Every five minutes | A stuck WhatsApp template must not hold up anything else. |
+| q-einvoice | Filing an invoice with the IRP and storing the number. Retries on failure with the reason kept. | On invoice creation, then retry | The IRP goes down. The invoice must not. |
+| q-courier | Booking a consignment, pulling tracking events, watching delivery against the run-out date. | Every thirty minutes | Polling is slow and chatty; keep it away from the rest. |
+| q-docs | Building invoice PDFs, labels, manifests, statements and report exports. | On demand | The only queue that produces files. |
+| q-house | Due-to-order checks, scan retention and deletion, overdue ticket escalation, daily and weekly reports, stock reorder alerts. | Nightly and hourly | Each run writes what it did, including what it deleted and under which rule. |
 
-```mermaid
-flowchart TB
-  web[Web app - React]
-  app[Patient app - Android and iPhone]
-  gw[Gateway]
-  web --> gw
-  app --> gw
-  gw --> identity
-  gw --> masters
-  gw --> onboarding
-  gw --> cases
-  gw --> files
-  gw --> production
-  gw --> tracker
-  gw --> billing
-  gw --> reports
-  cases -. events .-> production
-  cases -. events .-> billing
-  production -. events .-> notifications
-  tracker -. events .-> production
-  cases -. events .-> notifications
-  onboarding -. internal API .-> masters
-  onboarding -. internal API .-> identity
-  files --> media[(Media bucket)]
-  files --> scans[(Scan bucket - timed deletion)]
-  notifications --> wa[WhatsApp provider]
-  notifications --> mail[Email provider]
-  notifications --> push[App push service]
-```
 
-## 4. How services talk
+## 6. Files
 
-### 4.1 From outside
-
-Everything enters through the gateway at `/api/<service>/...`. The gateway only routes and rate-limits. Paths under `/internal` are blocked at the gateway.
-
-### 4.2 Between services — direct calls
-
-Used when the caller needs the answer now, for example onboarding creating a clinic in masters. The call carries a shared internal key (`x-internal-key`) and the acting user (`x-actor`) for the audit log. If a later step fails, the caller undoes the earlier steps. This is built and in use for lead approval.
-
-### 4.3 Between services — events
-
-Used when one service must react to something that happened in another, and the first service should not wait or fail because of it.
-
-| Event | Raised by | Reacts |
+| Kind | Where | Retention |
 |---|---|---|
-| `lead.received` | integrations | onboarding (create or update the lead) |
-| `lead.qualified` | integrations (from LumenAI) | onboarding (score, stage), notifications (to the BDE) |
-| `call.completed`, `message.received` | integrations | onboarding (activity on the lead) |
-| `lead.assigned`, `followup.due` | onboarding | notifications |
-| `patient.created` | cases | notifications (app invite), identity (patient login) |
-| `plan.approved` | cases | production (create aligner sets), billing (create invoice), notifications |
-| `plan.superseded` | cases | production (close remaining sets) |
-| `sets.dispatched` | production | notifications |
-| `box.received` | production | notifications |
-| `order.due` | production | notifications (to manufacturing team) |
-| `checkin.created` | tracker | production (move schedule), notifications (to dentist) |
-| `checkin.decided` | tracker | production (hold or release), cases (rescan), notifications |
-| `scan.expiring` | files | notifications |
-| `stock.low` | production | notifications |
-| `invoice.created`, `payment.recorded` | billing | notifications |
+| Photos and x-rays | Blob, `media` container, resized on upload | Case retention period, a system setting |
+| Scan files and the 3D setup | **Outside the portal**, in the existing service | The portal stores a link and a version only |
+| Invoices, labels, manifests | Blob, `docs` container, soft delete and versioning on | Statutory period |
+| Report exports | Blob, `exports` container | 30 days, then deleted by lifecycle rule |
 
-**Recommended design (assumed):** each service writes the event to an `outbox` collection in its own database in the same operation as the change. A small worker in that service delivers events to the receiving services' `/internal/events` endpoint and retries until accepted. Receivers store the event id and ignore repeats. This avoids a message broker in the first version and still loses nothing if a service is down. A broker can replace the worker later without changing the events.
+Uploads go **direct to storage** with a short-lived signed URL. The API never carries the file body.
 
-There are no database transactions across services.
+## 7. Security
 
-## 5. Sign-in and tokens
+- Access token 15 minutes; refresh token 7 days, single use, stored hashed.
+- Passwords hashed with bcrypt; five wrong attempts lock the account for 15 minutes.
+- Authenticate → permission → ownership scope in the query. Out of scope returns 404.
+- Internal routes blocked at the gateway.
+- Secrets in Key Vault, never in the repository.
 
-- Staff, partners and dentists: email and password. Patients: mobile number and a one-time code delivered by WhatsApp, with email as the fallback. **Assumed**, because SMS is not a chosen channel.
-- Sign-in returns an access token (15 minutes) and a refresh token (7 days for web, 60 days for the patient app; single use; stored hashed).
-- The access token carries role, level, permissions and scope ids. Every service verifies it with the shared secret.
-- Passwords are hashed with bcrypt. Five wrong attempts lock the account for 15 minutes.
-- For production, move token signing from a shared secret to a key pair, so that only identity can issue tokens and the other services can only verify. **Recommended.**
+## 8. What we are deliberately not buying
 
-## 6. File storage
-
-Two buckets.
-
-| Bucket | Holds | Rule |
+| Not this | Why not | Instead |
 |---|---|---|
-| Media | Photos, x-rays, videos, IPR files, setup files, check-in photos, onboarding documents | Standard storage, kept |
-| Scans | STL files only | Day 30: move to low-cost class. Day 180: delete. **Settled** |
+| Azure Cosmos DB for MongoDB | Billed per request unit. A chatty application with a lot of small reads costs several times an Atlas cluster of the same size. | MongoDB Atlas on one cluster. |
+| Cloudinary on a paid plan | At nine photos and two x-rays a case, a thousand cases a month passes the free tier within weeks, and the paid plan is more than the whole rest of the bill. | Azure Blob Storage, with the app resizing the photo on upload. |
+| Vercel for the API | Serverless requests time out. Scan handovers, PDF building and the worker all fight the limit. | Express on App Service, with the React build served by the same app. |
+| One App Service per module | Five services means five plans and five idle machines. The module boundary is a code decision, not a hosting decision. | One plan, modules inside one process. |
+| Azure Functions on the Premium plan | Premium exists to keep functions warm. A worker already running in the app is warm by definition. | The worker inside the app, with Always On. |
+| Keeping scan files in the portal | Forty megabytes a case, downloaded repeatedly, is mostly an egress bill. | Scans stay in the outside service. The portal stores the link and the version. |
+| A staging environment running all month | A second plan doubles the compute bill for something used an hour a week. | A deployment slot on the same plan. Free. |
 
-How it works:
 
-1. The client asks the `files` service for an upload link. The service checks access and returns a short-lived signed link.
-2. The client uploads straight to the bucket.
-3. The client confirms. The service records size, checksum, uploader and, for a scan, `expiresOn` = upload date + 180 days.
-4. Downloads work the same way: access check, then a short-lived signed link.
-5. The move and the deletion are **bucket lifecycle rules**, not application code. They run even if the portal is down.
-6. A daily job in `files` marks records whose file has gone as deleted, and raises `scan.expiring` 14 days ahead.
-7. A hold is set on the object itself, so the lifecycle rule cannot delete it.
+## 9. What it costs
 
-Choosing the low-cost class: pick one whose minimum storage period is shorter than 150 days, because a scan sits in it from day 30 to day 180. On Google Cloud that is Coldline (90-day minimum); Archive (365-day minimum) would cost more. On another provider, check the equivalent minimum-duration charge before setting the rule.
-
-## 7. Hosting
-
-**Settled:** a paid cloud with servers in India. The provider is **open**.
-
-| Part | Needs |
-|---|---|
-| Services | Container hosting with at least two instances of each service in production |
-| Database | Managed MongoDB replica set in an India region, automatic daily backups, point-in-time recovery |
-| Storage | S3-compatible buckets in an India region with lifecycle rules and object holds |
-| Secrets | A secrets manager. No secrets in the repository or in images |
-| Network | HTTPS everywhere; database and internal ports not reachable from the internet |
-| Environments | Local (Docker Compose, built), staging, production |
-
-Local Docker Compose is for development and demos with sample data only. **Settled.**
-
-## 8. Patient app
-
-- One React Native codebase for Android and iPhone. **Assumed.**
-- Uses the same APIs through the gateway.
-- Push notifications through the platforms' own services.
-- The app stores the refresh token in the phone's secure storage.
-- Store listings under the name AVMAligners. Publishing needs a Google Play developer account and an Apple developer account in the company's name. **Open: who creates these.**
-
-## 9. Notifications
-
-- WhatsApp through the WhatsApp Business connection held by the `integrations` service, using approved templates.
-- Email through a transactional email provider.
-- App notifications through the push services.
-- The `notifications` service decides what to send and to whom. For WhatsApp it hands the message to `integrations`; for email and app alerts it talks to the provider itself. Other services only raise events.
-
-## 10. Integrations
-
-One service, `integrations`, is the only part of the system that talks to outside partners for leads, calls and WhatsApp.
-
-| Partner | Direction | What flows |
+| Item | What it does | Indicative cost |
 |---|---|---|
-| Meta, Google, Bing, TikTok lead forms; website forms | In | New leads with source, campaign and ad details |
-| LumenAI | Both | Out: a new lead to qualify, a follow-up to make. In: score, outcome, call and WhatsApp summaries, transcripts, recording links |
-| MCube, Exotel | Both | Out: a call request from the lead screen. In: call records with duration, outcome and recording link |
-| WhatsApp Business | Both | Out: template messages. In: replies and delivery status |
+| Azure App Service, Linux, one plan | Runs the API, the worker and the React app. Start on B1 while the factory is small; move to B2 or P1v3 when case volume grows. | ₹1,200 a month |
+| MongoDB Atlas, Mumbai region | All eleven databases on one M10 cluster. Backups, point-in-time restore and a replica set are included. | ₹5,100 a month |
+| Azure Blob Storage | Photos, x-rays, invoice PDFs, labels, manifests, pack photos. Lifecycle rules move old files to cool storage and delete on schedule. | ₹400 a month |
+| Azure Storage Queue | One queue per job type. Failed work waits and is retried instead of vanishing. | ₹50 a month |
+| Application Insights | Errors and slow requests. Sampling on, thirty days of retention. | ₹300 a month |
+| GST e-invoicing provider | One call per invoice to get the IRN, and the e-way bill for dispatches above the value limit. | [[quote to confirm]] |
+| Courier aggregator | Booking, waybill, label and tracking across couriers through one API. | Per shipment, no monthly fee |
+| WATI | Already paid for. Partner notifications and the one-time code for the status API. | Already running |
+| Razorpay | Already decided. Pay links on invoices and statements. | About 2% per transaction |
+| Transactional email | Logins, password resets, statements. Brevo or Zoho free tier is enough at this volume. | ₹0 to start |
+| Domain and certificate | App Service managed certificate is free and renews itself. | ₹100 a month |
 
-Design rules:
 
-1. **One adapter per partner.** An adapter turns the partner's format into the portal's own events and back. Replacing a partner means replacing one adapter.
-2. **Either side.** Telephony and WhatsApp may be connected directly, or through LumenAI. A setting per channel says which. The rest of the portal sees the same events either way. **Open: which side.**
-3. **Nothing is lost.** Every incoming item is stored as received before it is processed, has its signature checked, is processed once, and can be replayed.
-4. **Least access.** Each partner has its own key. A partner can reach only its own endpoint and cannot read portal data beyond what that endpoint returns.
-5. **No clinical data.** Integrations carry lead and contact data only. Patient records never go to an ad platform, a calling tool or LumenAI.
-
-## 11. Repository layout
-
-```
-apps/web                 React web app
-apps/patient             React Native patient app          (phase 4)
-gateway                  API gateway
-packages/common          shared: auth, permissions, errors, audit, events
-services/identity        built
-services/masters         built
-services/onboarding      built
-services/cases           phase 2
-services/files           phase 2
-services/production      phase 3
-services/tracker         phase 4
-services/notifications   phase 4
-services/billing         phase 5
-services/reports         phase 5
-services/integrations    sales track
-docs/handover            these documents
-scripts/e2e.mjs          end-to-end checks
-```
-
-## 12. Rules for every new service
-
-1. Own database. No reads from another service's database.
-2. Every route: authenticate → permission → scope in the query. Out-of-scope returns 404.
-3. Every request body validated.
-4. Every create, update, approval and status change audited.
-5. New permissions added to `packages/common/src/permissions.js`.
-6. End-to-end checks added, including one "another user cannot see this" check per record type.
-
-<!--EXT2-->
-## 13. Services added in version 2.0
-
-The rules of section 12 apply to each: its own database, its own API, events through the outbox, scope in every query.
-
-| Module | Service | Database | Phase |
-|---|---|---|---|
-| Partner management | partners | `avm_partners` | 6 |
-| White-label branding | branding | `avm_branding` | 6 |
-| Store and asset library | store | `avm_store` | 6 |
-| Support desk and complaints | support | `avm_support` | 6 |
-| Finance extensions | billing (extended) | `avm_billing` | 6 |
-| Marketing automation | marketing | `avm_marketing` | 7 |
-| Calling workspace and AI playbooks | onboarding and integrations (extended) | `avm_onboarding, avm_integrations` | 7 |
-| Sales performance | sales | `avm_sales` | 7 |
-| Clinical extensions | clinical; cases and files (extended) | `avm_clinical` | 8 |
-| Patient engagement | tracker (extended) | `avm_tracker` | 8 |
-| Logistics | logistics | `avm_logistics` | 8 |
-| Manufacturing execution and quality system | production (extended); quality | `avm_production, avm_quality` | 9 |
-| Purchasing and costing | purchasing | `avm_purchasing` | 9 |
-| Learning and knowledge | learning | `avm_learning` | 9 |
-| Platform, privacy and management insight | identity (extended); insight | `avm_identity, avm_insight` | 10 |
-
-Twelve services are new (partners, branding, store, support, marketing, sales, clinical, logistics, quality, purchasing, learning, insight), making 23. Six existing services are extended with new collections and endpoints: billing, onboarding, integrations, tracker, production and identity.
-
-### New partner connections
-
-Each is one adapter in the integrations service, behind the same interface as the existing ones.
-
-| Partner | Direction | Used by |
-|---|---|---|
-| Payment partner | Out: payment session. In: signed payment event | Finance extensions |
-| E-invoice and e-way bill provider | Out: invoice. In: reference number and QR | Finance extensions |
-| Courier partner | Out: booking. In: tracking and proof of delivery | Logistics |
-| Scanner clouds | In: scans | Clinical extensions |
-| E-sign provider | Out: agreement. In: signed event | Sales performance |
-| Ad platforms, conversions and audiences | Out: events and hashed lists | Marketing automation |
-| Patient finance partner | Out: offer. In: approval | Finance extensions |
-| Accounting software | Out: export file | Finance extensions |
-| Printers | In: job status | Manufacturing execution |
-| Single sign-on provider | In: sign-in | Platform |
-
-### Events added
-
-`store.ordered`, `ticket.opened`, `ticket.breached`, `payment.received`, `credit.hold_on`, `credit.hold_off`, `brand.live`, `artwork.approved`, `shipment.booked`, `shipment.delivered`, `shipment.at_risk`, `replacement.requested`, `set.station_scanned`, `nc.opened`, `recall.started`, `stock.low` (now also read by purchasing), `lead.stage_changed` (now also read by marketing), `rating.low`, `agreement.signed`, `course.passed`.
+About **₹10,000 a month** in phase 1, rising to about **₹25,000** at two thousand cases a month.
+Figures are indicative for Central India and Mumbai as at 24-11-2026 and must be confirmed before purchase.

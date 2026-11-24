@@ -1,112 +1,77 @@
 # 10 — Non-functional requirements
 
-## 1. Privacy and the DPDP Act
+_AVMAligners Portal · handover pack v2.0 · 24-11-2026. Replaces v1 of 22-11-2026._
 
-The portal holds health data of identifiable patients, including children. This section sets the minimum. It is not legal advice; the company's legal adviser should review it before go-live. The Grievance Officer named in the AVMSmiles privacy policy is the contact for data requests.
+## Security
 
-| Requirement | How |
-|---|---|
-| Consent | The patient accepts a clear notice in the app at first use: what is held, why, for how long, who sees it. The version accepted and the time are stored |
-| Children | A patient under 18 needs a parent or guardian. The guardian's mobile receives the invitation and the guardian gives consent. No tracking or advertising of any kind |
-| Purpose limit | Data is used for treatment, production, dispatch and billing only. Patient data is never used for marketing without a separate consent |
-| Least access | Each role sees only what its work needs (document 02). Production sees patient code and name only |
-| Right to access | A patient can ask in the app for a copy of their data. The request goes to Admin and is logged |
-| Right to correction and erasure | A patient can ask for correction or deletion. Deletion is done by Super Admin after checking legal retention duties, and is logged |
-| Retention | STL scans: 180 days from upload. Other periods are **open** and must be set with the legal adviser: clinical records, photos, invoices |
-| Breach | A suspected breach is reported to the Grievance Officer at once. The audit log and access logs must allow the affected records to be identified |
-| Data location | Database, files and backups stay in India |
-| Processors | WhatsApp, email and push providers receive only what the message needs. No clinical details in message text |
-| Sales leads | A lead's contact details are personal data too. The lead is told who is calling and why; a request not to be contacted is recorded and respected on every channel. Calling and messaging must follow the telecom rules on commercial communication; the legal adviser should confirm what consent each lead source gives |
-| Call recordings | Recorded only with notice to the person called. Recordings stay with the telephony provider or LumenAI; the portal holds a link |
-| Partners | LumenAI, MCube, Exotel and the ad platforms receive lead data only, under a written agreement. Patient data is never sent to them |
+- Access token 15 minutes, refresh token 7 days and single use, stored hashed.
+- Passwords hashed with bcrypt. Five wrong attempts lock the account for 15 minutes.
+- Authenticate, then permission, then ownership scope inside the database query. A record outside scope returns 404, never 403.
+- SUPER_ADMIN_ONLY permissions cannot be granted to any other role, by anyone.
+- A user may create or change only users whose role level is below their own.
+- Secrets in Azure Key Vault. None in the repository, none in an environment file on a laptop.
+- Uploads go direct to storage with a short-lived signed URL, scanned for type and size before the record is accepted.
+- Rate limit at the gateway. Internal routes refused from outside.
 
-Message wording rule: a notification never contains a diagnosis or clinical detail. "Your next aligner box has been dispatched" is fine.
+## Privacy and the DPDP Act
 
-## 2. Security
+- All data in India: Azure Central India, MongoDB Atlas Mumbai.
+- Consent recorded on the patient record, with who recorded it and when. A guardian is recorded where the patient is under 18.
+- Scan files are kept for 180 days from delivery and then deleted by the retention job, which writes down what it removed and under which rule.
+- Photos and x-rays follow the case retention period, set as a system setting, not hard-coded.
+- A data request is a record in avm_identity with the response and the date, so the Grievance Officer can answer within the statutory period.
+- No patient messaging from the portal. The partner talks to the patient.
 
-| Area | Requirement |
-|---|---|
-| Transport | HTTPS only. HSTS on |
-| Passwords | bcrypt, minimum 10 characters with upper case, lower case and a number. Built |
-| Lockout | Five wrong attempts, 15 minutes. Built |
-| Sessions | 15-minute access token; single-use refresh token; all sessions end on password change, role change or disable. Built |
-| One-time codes | Six digits, valid five minutes, five attempts, stored hashed, rate-limited per number |
-| Authorisation | Checked in every service on every request. Scope in the query. Built for phase 1 |
-| Input | Every body validated. File type and size checked before an upload link is given |
-| Files | Private buckets. Short-lived signed links only. Links are never stored or logged |
-| Secrets | In a secrets manager. Rotated on staff change |
-| Internal calls | Shared key today; move to per-service credentials for production |
-| Admin accounts | Second-factor sign-in for Super Admin and Admin before go-live. **Recommended** |
-| Dependencies | Automated vulnerability alerts on the repository; patch within 14 days for high severity |
-| Logs | No passwords, tokens, codes, signed links or patient contact details in logs |
-| Testing | An independent security test before go-live |
+## Keeping records
 
-## 3. Audit
+- Nothing is deleted. State changes only, with who, when and why.
+- Every document carries created by, created at, changed by, changed at, a version and the software release that wrote it.
+- The audit log is written by a database user with insert-only rights on that collection.
+- Approvals are sealed records with a payload fingerprint and are never editable, by any role.
+- Every deployment writes a release record: version, date, what changed, who approved, link to the test report.
 
-- Append-only. No update or delete route. Built.
-- Records who, when, from where, what, and before and after for access and price changes.
-- Kept for at least three years (**assumed**).
+## Performance and load
 
-## 4. Availability and recovery
+- Planning figures: 2,000 cases a month, 40,000 sets a month, 80 concurrent users, 18 logins by role.
+- A list page answers in under one second at the ninety-fifth percentile on the planning figures.
+- Anything slower than two seconds goes on a queue and tells the user it is being prepared.
+- The shop floor must work on a tablet over clinic wifi. Station scans retry and never lose a scan.
 
-| Item | Target (**assumed**, confirm) |
-|---|---|
-| Availability | 99.5% in business hours |
-| Backups | Database: daily, kept 30 days, with point-in-time recovery. Media bucket: versioning on |
-| Recovery point | At most 1 hour of data lost |
-| Recovery time | Back within 4 hours |
-| Restore test | Once a quarter |
+## Availability and recovery
 
-The scan bucket is deliberately **not** backed up beyond its 180 days.
+- Target 99.5 per cent in working hours. The factory is not a 24-hour operation and does not need 99.9.
+- Atlas point-in-time restore. A restore is practised once a quarter and the practice is recorded.
+- Blob storage with soft delete and versioning on the docs container.
+- A failed external service (IRP, courier, WhatsApp) never blocks the portal. The work waits on its queue and shows the reason.
 
-## 5. Performance and load
+## How it looks and reads
 
-Planning figures (**assumed**, from the current portal's scale):
+- Dates shown to users are DD-MM-YYYY. The API uses ISO 8601.
+- Money in whole rupees with Indian digit grouping.
+- The brand is written AVMSmiles; the product is AVMAligners.
+- Works on the current versions of Chrome and Edge on Windows, and Safari on an iPad. No support for Internet Explorer.
+- English only in phase 1.
 
-| Measure | Figure |
-|---|---|
-| New leads | Up to 20,000 a month |
-| Dentists | Up to 2,000 |
-| New patients | Up to 1,500 a month |
-| Aligner sets created | Up to 60,000 a month |
-| Patient app users active | Up to 20,000 |
-| File uploads | Up to 20,000 a month; STL up to 150 MB each |
+## Running cost
 
-Targets: list and detail pages answer in under 1 second at these volumes; uploads resume after a dropped connection.
+- The whole system is budgeted at about ₹10,000 a month in phase 1 and about ₹25,000 at 2,000 cases a month.
+- Any design choice that doubles the hosting bill needs the Head of Marketing’s agreement before it is built.
 
-## 6. Usability
 
-- Web app works on desktop and tablet, current Chrome, Edge and Safari.
-- Patient app supports Android 9 and later, iOS 15 and later (**assumed**).
-- Plain English. No codes shown to patients except their patient code.
-- Every destructive action asks for confirmation and, where the workflow needs one, a reason.
+## What certification needs from the software
 
-## 7. Operations
+| Requirement | What it asks for | What satisfies it here | Ready by |
+|---|---|---|---|
+| ISO 13485 clause 4.1.6 | Software used in the quality system has to be validated before use, and again after it changes. | Automated test suite in the repository, a test report per release, and the release log in the database that links the two (A11). | Phase 1 |
+| ISO 13485 clause 4.2.4 and 4.2.5 | Documents and records must be controlled: versions, approvals, review dates, and records that cannot be quietly altered. | The document module (M19) with versions and approvals; the no-delete rule and the stamp on every record (A05, A06). | Shape in phase 1, screens in phase 3 |
+| ISO 13485 clause 7.5.9 | Traceability: for a given device, which materials, which process, which customer. | The whole-chain query (A10) and the trace keys carried at every step. | Phase 2 |
+| ISO 13485 clause 7.5.6 | Process validation where the result cannot be fully verified by inspection. | Machine records with calibration and service dates, operator skills, and the batch record holding resin and sheet lots. | Phase 2 |
+| ISO 13485 clause 8.2.1 and 8.5.2 | Complaints and corrective action with cause, action, owner and proof of closure. | The non-conformance record in avm_quality and the product-complaint ticket type in M20. | Phase 2 |
+| IEC 62304 | A software lifecycle: requirements, design, testing, problem resolution and change control, written down. | The three documents already built are the requirements half. The release log, the issue tracker and the test reports are the other half. | Running from phase 1 |
+| Medicolegal approval | Who, with what qualification, approved this treatment, and exactly what they approved. | The sealed approval record (A08) with the registration number, the plan version, the scan reference and a fingerprint of the approved payload. | Phase 1 |
+| DPDP Act 2023 | Patient data held in India, minimum retention, a named Grievance Officer, and a way to answer a data request. | Indian region only (A14), the retention job in q-house, the data_requests collection, and consent recorded on the patient record. | Phase 1 |
 
-- Three environments: local, staging, production. Production data is never copied to the others.
-- Health endpoint on every service. Built.
-- Central logs and alerts for: service down, failed event deliveries, failed messages, lifecycle job errors, low disk on the database.
-- Deployments from the main branch after CI passes, with a rollback step.
 
-## 8. Costs to plan for
-
-No figures are given here; they depend on the provider chosen.
-
-- Cloud hosting, database and storage in India.
-- WhatsApp provider charges per conversation.
-- Email provider.
-- Google Play developer account (one-time fee) and Apple developer account (yearly fee).
-- Security test.
-
-<!--EXT2-->
-## 9. Added in version 2.0
-
-- **Payments.** Card and bank details are entered only on the payment partner's page. The portal stores a reference, never the details.
-- **Two-step sign-in** is required for all staff and distributor owners, and available to dentists.
-- **Partner keys** are limited to named endpoints, stored hashed, and can be revoked at once. A test environment is provided for partners.
-- **White-label confidentiality.** A partner-branded case must not expose the company name to that partner's dentists or patients on any screen, message or document. The exception is any line the law requires on a label or insert.
-- **Regulatory records.** The device history record, controlled documents, training records, calibration and recall records are kept for the period the medical device rules require. **Open:** the exact period and licence details, with the regulatory consultant.
-- **AI use.** LumenAI answers only from approved articles, stops on the handover rules, and every AI message is kept for audit.
-- **Consent before contact.** No campaign message, AI call or conversion event is sent without a consent record for that channel.
-- **Agreements** signed on screen are stored with the signer, time and method.
-- **Load.** The marketing forms and the courier and payment webhooks are public endpoints. They are rate-limited and verified by signature.
+Which standard applies is still open — ISO 13485 alone, a CDSCO medical device licence, or CE
+marking for export are three different amounts of work. This table is built for the strictest of the
+three, because everything in it is cheap now and expensive to retrofit.
